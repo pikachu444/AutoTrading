@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE files
+.vscode/
+.idea/
+
+# Environment variables (SECURITY)
+.env
+
+# AutoTrading Output Logs & Watchlists
+watchlists/
+logs/
+*.csv
