@@ -1,5 +1,4 @@
 import logging
-import threading
 import pandas as pd
 import FinanceDataReader as fdr
 from screening.screener_kr import Screener
@@ -8,12 +7,8 @@ class ScreenerUS(Screener):
     """
     [미국 주도주 스캐너]
     S&P 500 종목을 대상으로 미너비니 콤보와 RS 스코어를 측정합니다.
-    (핵심 알고리즘은 부모 클래스인 한국 스캐너 로직을 상속받아 재사용합니다.)
+    (핵심 알고리즘은 부모 클래스인 Screener 로직을 상속받아 재사용합니다.)
     """
-    # 부모(한국 스캐너) 클래스와 독립적인(격리된) 미국 전용 메모리 공간 및 락(Lock) 확보
-    _cached_results = None
-    _last_scan_date = None
-    _scan_lock = threading.Lock()
     
     def get_market_tickers(self) -> pd.DataFrame:
         """S&P 500 종목 데이터 리스트 수집"""

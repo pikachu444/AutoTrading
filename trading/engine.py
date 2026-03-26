@@ -16,38 +16,68 @@ from notification.telegram_bot import TelegramBotManager
 class BotEngine:
     """
     [하이브리드 메인 관제탑 엔진]
-    지금까지 만든 모든 OOP 모듈(API, Data, Screener, Strategy, Portfolio)을 결합하여
-    낮에는 트레이딩을, 밤에는 다음날 사냥할 주도주를 스크리닝(저장)하는 역할을 통제합니다.
+    시스템의 모든 OOP 모듈(API, Data, Screener, Strategy, Portfolio)의 생명주기와
+    통신(EventBus)을 조율하는 중앙 컨트롤러입니다.
     """
-    def __init__(self):
+    def __init__(self, 
+                 event_bus: EventBus, 
+                 api: KoreaInvestmentAPI, 
+                 data_manager: DataManager, 
+                 screener_kr: Screener, 
+                 screener_us: ScreenerUS, 
+                 strategy: HybridMomentumStrategy, 
+                 portfolio: PortfolioManager,
+                 telegram_bot: TelegramBotManager):
+        
+        self.is_paused = False  # 자동 매매 일시정지 제어 플래그
+        self.is_running = False # 시스템 엔진 가동 상태 플래그
+
+        # 의존성 주입 (Dependency Injection)
+        self.event_bus = event_bus
+        self.notifier = NotificationService(self.event_bus) # Notifier는 엔진과 강결합된 유틸리티로 취급
+        self.api = api
+        self.data_manager = data_manager
+        self.screener = screener_kr
+        self.screener_us = screener_us
+        self.strategy = strategy
+        self.portfolio = portfolio
+        self.telegram_bot = telegram_bot
+
+    def start(self):
+        """
+        [엔진 가동]
+        이벤트 구독을 활성화하고 텔레그램 폴링 등 백그라운드 서비스를 시작합니다.
+        """
+        if self.is_running:
+            logging.warning("[BotEngine] 엔진이 이미 실행 중입니다.")
+            return
+
+        logging.info("[BotEngine] 시스템 부팅 및 이벤트 와이어링 시작...")
+        
         try:
-            self.is_paused = False  # 자동 매매 일시정지 제어 플래그
-            
-            # ⭐️ 아키텍처 핵심: 이벤트 버스와 알림 서비스 연결 (옵저버 패턴)
-            self.event_bus = EventBus()
-            self.notifier = NotificationService(self.event_bus)
-            
-            # 텔레그램봇 원격 제어 이벤트 리스너 등록
+            # 1. 이벤트 구독 등록 (Wiring)
             self.event_bus.subscribe("REQUEST_PORTFOLIO", self._handle_request_portfolio)
             self.event_bus.subscribe("MANUAL_BUY", self._handle_manual_buy)
             self.event_bus.subscribe("CMD_STOP", self._handle_cmd_stop)
             self.event_bus.subscribe("CMD_RESUME", self._handle_cmd_resume)
             
-            # ⭐️ 텔레그램 명령어 수신 봇 백그라운드 구동
-            self.telegram_bot = TelegramBotManager(self.event_bus)
-            self.telegram_bot.start_polling()
+            # 2. 텔레그램 명령어 수신 시작
+            if self.telegram_bot:
+                self.telegram_bot.start_polling()
             
-            self.api = KoreaInvestmentAPI()
-            self.data_manager = DataManager(self.api)
-            self.screener = Screener()
-            self.screener_us = ScreenerUS()
-            self.strategy = HybridMomentumStrategy()
-            # 5종목 분산, 손절선 -8%
-            self.portfolio = PortfolioManager(max_positions=5, stop_loss_pct=0.08)
-            logging.info("[BotEngine] 하이브리드 자동매매 엔진 연동 부팅 성공.")
+            self.is_running = True
+            logging.info("[BotEngine] 🚀 하이브리드 자동매매 엔진이 정상적으로 가동되었습니다.")
+            
         except Exception as e:
-            logging.error(f"[BotEngine] 초기화 실패 (API 등 오류): {e}")
-            exit(1)
+            logging.error(f"[BotEngine] 엔진 구동 중 치명적 오류 발생: {e}", exc_info=True)
+            raise e # 상위 호출자(main.py)에게 오류 전달
+
+    def stop(self):
+        """[엔진 정지] 하위 서비스들을 안전하게 종료합니다."""
+        logging.info("[BotEngine] 엔진 종료 절차를 시작합니다...")
+        self.is_running = False
+        # 필요한 경우 여기에 텔레그램 폴링 중지 로직 등을 추가할 수 있습니다.
+
         
     def run_us_scan(self):
         """매일 아침 07:30 에 예약되어 텔레그램 오픈 전에 방대한 S&P500 최신본을 수집 후 캐싱(보관)합니다."""
@@ -92,7 +122,8 @@ class BotEngine:
             df = pd.read_csv(path, encoding='utf-8-sig')
             # 종목번호가 숫자로 변환되며 앞의 0이 잘려버릴 수 있으므로 6자리 문자열로 원상복구합니다 (예: 5930 -> 005930)
             return df['Symbol'].astype(str).str.zfill(6).tolist()
-        except Exception:
+        except Exception as e:
+            logging.error(f"[BotEngine] 워치리스트 파일을 읽을 수 없습니다 ({path}): {e}")
             return []
 
     def is_market_open(self) -> bool:

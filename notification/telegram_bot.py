@@ -2,10 +2,11 @@ import time
 import requests
 import threading
 import logging
+import os
+import pandas as pd
+from datetime import datetime
 from core.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 from notification.notifier import send_telegram_msg
-from screening.screener_us import ScreenerUS
-from screening.screener_kr import Screener
 
 class TelegramBotManager:
     """
@@ -24,10 +25,6 @@ class TelegramBotManager:
         if self.event_bus:
             self.event_bus.subscribe("PORTFOLIO_REPORT", self._on_portfolio_report)
             self.event_bus.subscribe("BOT_STATE_CHANGED", self._on_bot_state_changed)
-            
-        # 스캐너를 명령어 수신때마다 재생성하지 않고, 하나씩만 유지하여 내부 캐시(Cache)를 공용으로 활용합니다.
-        self.screener_kr = Screener()
-        self.screener_us = ScreenerUS()
         
     def start_polling(self):
         if not self.token or "여기에" in self.token:
@@ -61,8 +58,9 @@ class TelegramBotManager:
                         message = update.get("message", {})
                         if message:
                             self._handle_message(message)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"[TelegramBot] 폴링 중 일시적 오류 발생: {e}")
+                time.sleep(5) # 오류 발생 시 잠시 대기
             time.sleep(1)
 
     def _handle_message(self, message):
@@ -143,35 +141,77 @@ class TelegramBotManager:
         msg = "✅ *[봇 생존 신고]*\n현재 관제탑과 알림 봇이 퍼블릭 모드로 정상 가동 중입니다."
         send_telegram_msg(msg, chat_id=chat_id)
 
-    def _reply_scan_kr(self, chat_id):
-        send_telegram_msg("🇰🇷 *[국내장 주도주 스캔 작동]*\n코스피/코스닥 대장주 발굴 스캔을 요청했습니다. (오늘자 첫 스캔일 경우 데이터 수집에 약 5분이 소요되며, 이미 오늘 누군가 스캔을 시켰다면 캐시에서 1초 만에 반환됩니다.)", chat_id=chat_id)
+    def _read_watchlist(self, market: str) -> list:
+        """
+        [공통 파일 조회 헬퍼]
+        오늘 날짜의 워치리스트 CSV 파일을 읽어서 dict 리스트로 반환합니다.
+        반환값:
+          - list(dict): 주도주 리스트 (정상)
+          - None: 파일이 없음 (아직 스캔 전)
+          - []: 파일 있지만 데이터 0개 (하락장 확인)
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        path = f"watchlists/watchlist_{market}_{today}.csv"
         
-        def run_kr_scan():
-            targets = self.screener_kr.run_daily_scan(top_n=10)
-            if targets:
-                msg = f"🐯 [국내장 주도주 스캔 완료]\n한국 증시 중 미너비니 요건을 통과한 TOP {len(targets)} 주도주!\n\n"
-                for rank, stock in enumerate(targets, 1):
-                    msg += f"{rank}위: {stock['Name']} ({stock['Symbol']}) - RS {stock['RS_Rating']:.1f}점\n"
-                send_telegram_msg(msg, chat_id=chat_id)
-            else:
-                send_telegram_msg("🐯 [국내장 스캔 완료]\n오늘 엄청난 하락장이었나요? 한국 증시 중 미너비니 7대 원칙을 통과한 대장주가 0개입니다.", chat_id=chat_id)
-                
-        threading.Thread(target=run_kr_scan, daemon=True).start()
+        if not os.path.exists(path):
+            return None  # 파일 없음 = 아직 스캔 전
+        
+        try:
+            df = pd.read_csv(path, encoding='utf-8-sig')
+            return df.to_dict('records')  # 0행이어도 [] 반환 (하락장 마커)
+        except Exception as e:
+            logging.error(f"[TelegramBot] 워치리스트 파일 읽기 실패 ({path}): {e}")
+            return None  # 파일 파싱 실패도 None으로 안내
+
+    def _reply_scan_kr(self, chat_id):
+        results = self._read_watchlist("kr")
+        
+        if results is None:
+            send_telegram_msg(
+                "🇰🇷 *[국내장 주도주 조회]*\n"
+                "아직 오늘 스캔 데이터가 준비되지 않았습니다.\n"
+                "⏰ 스케줄러가 매일 *오전 08:00*에 자동으로 스캔을 실행합니다.",
+                chat_id=chat_id
+            )
+            return
+        
+        if not results:
+            send_telegram_msg(
+                "🐯 [국내장 스캔 결과]\n"
+                "오늘 미너비니 7대 원칙을 통과한 대장주가 *0개*입니다. (하락장, 관망 권장)",
+                chat_id=chat_id
+            )
+            return
+        
+        msg = f"🐯 [국내장 주도주 TOP {len(results)}]\n한국 증시 중 미너비니 요건을 통과한 대장주!\n\n"
+        for rank, stock in enumerate(results, 1):
+            msg += f"{rank}위: {stock['Name']} ({stock['Symbol']}) - RS {float(stock['RS_Rating']):.1f}점\n"
+        send_telegram_msg(msg, chat_id=chat_id)
 
     def _reply_scan_us(self, chat_id):
-        send_telegram_msg("🇺🇸 *[미국장 주도주 스캔 작동]*\n미국 S&P500 대장주 발굴 스캔을 요청했습니다. (오늘자 첫 스캔일 경우 데이터 수집에 약 5분이 소요되며, 이미 성공적으로 스캔되었다면 1초 내로 결괏값이 메아리칩니다.)", chat_id=chat_id)
+        results = self._read_watchlist("us")
         
-        def run_us_scan():
-            targets = self.screener_us.run_daily_scan(top_n=10)
-            if targets:
-                msg = f"🦅 [미국장 주도주 스캔 완료]\nS&P500 중 미너비니 요건을 통과한 TOP {len(targets)} 주도주!\n\n"
-                for rank, stock in enumerate(targets, 1):
-                    msg += f"{rank}위: {stock['Name']} ({stock['Symbol']}) - RS {stock['RS_Rating']:.1f}점\n"
-                send_telegram_msg(msg, chat_id=chat_id)
-            else:
-                send_telegram_msg("🦅 [미국장 스캔 완료]\n오늘 엄청난 하락장이었나요? S&P500 중 미너비니 7대 원칙을 통과한 대장주가 0개입니다.", chat_id=chat_id)
-                
-        threading.Thread(target=run_us_scan, daemon=True).start()
+        if results is None:
+            send_telegram_msg(
+                "🇺🇸 *[미국장 주도주 조회]*\n"
+                "아직 오늘 스캔 데이터가 준비되지 않았습니다.\n"
+                "⏰ 스케줄러가 매일 *오전 07:30*에 자동으로 스캔을 실행합니다.",
+                chat_id=chat_id
+            )
+            return
+        
+        if not results:
+            send_telegram_msg(
+                "🦅 [미국장 스캔 결과]\n"
+                "S&P500 중 미너비니 7대 원칙을 통과한 대장주가 *0개*입니다. (하락장, 관망 권장)",
+                chat_id=chat_id
+            )
+            return
+        
+        msg = f"🦅 [미국장 S&P500 주도주 TOP {len(results)}]\nS&P500 중 미너비니 요건을 통과한 대장주!\n\n"
+        for rank, stock in enumerate(results, 1):
+            msg += f"{rank}위: {stock['Name']} ({stock['Symbol']}) - RS {float(stock['RS_Rating']):.1f}점\n"
+        send_telegram_msg(msg, chat_id=chat_id)
 
     # ------------------ 관리자(본인) 전용 이벤트 콜백 ------------------
     # 관리자는 무조건 config.py 의 allowed_chat_id 이므로 매개변수를 쓰지 않아도 됩니다.

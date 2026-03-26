@@ -3,6 +3,14 @@ import schedule
 import logging
 
 from trading.engine import BotEngine
+from core.event_bus import EventBus
+from data.kis_api import KoreaInvestmentAPI
+from data.data_manager import DataManager
+from screening.screener_kr import Screener
+from screening.screener_us import ScreenerUS
+from trading.strategy import HybridMomentumStrategy
+from trading.portfolio import PortfolioManager
+from notification.telegram_bot import TelegramBotManager
 
 # ==============================================================================
 # 로깅 (Logging) 설정
@@ -17,9 +25,31 @@ logging.basicConfig(
 )
 
 def run_scheduler():
-    bot = BotEngine()
+    # 1. 모든 독립 부품(Dependencies) 생성
+    event_bus = EventBus()
+    api = KoreaInvestmentAPI()
+    data_manager = DataManager(api)
+    screener_kr = Screener()
+    screener_us = ScreenerUS()
+    strategy = HybridMomentumStrategy()
+    portfolio = PortfolioManager(max_positions=5, stop_loss_pct=0.08)
+    telegram_bot = TelegramBotManager(event_bus)
+
+    # 2. 엔진 조립 (Dependency Injection) 및 가동
+    bot = BotEngine(
+        event_bus=event_bus,
+        api=api,
+        data_manager=data_manager,
+        screener_kr=screener_kr,
+        screener_us=screener_us,
+        strategy=strategy,
+        portfolio=portfolio,
+        telegram_bot=telegram_bot
+    )
     
-    # 1. 봇 가동 즉시 초기 이벤트 발송 (옵저버에게 알림 위임)
+    bot.start()
+    
+    # 3. 봇 가동 즉시 초기 이벤트 발송 (옵저버에게 알림 위임)
     bot.event_bus.publish("SYSTEM_STARTUP")
     
     # [정기 모니터링 자동화 스케줄러 등록]

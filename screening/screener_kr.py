@@ -1,23 +1,21 @@
-import time
 import pandas as pd
 import pandas_ta as ta
 import FinanceDataReader as fdr
 import logging
 import os
-import threading
 from datetime import datetime, timedelta
 
 class Screener:
     """
     [마크 미너비니 & 윌리엄 오닐 스캐너]
     FinanceDataReader(fdr)를 활용해 거래소 전 종목의 52주 데이터를 고속 수집하고,
-    미너비니의 주도주 텐플릿과 상대강도(RS) 점수를 기반으로 타겟 10종목을 걸러냅니다.
+    미너비니의 주도주 템플릿과 상대강도(RS) 점수를 기반으로 타겟 종목을 걸러냅니다.
+
+    [아키텍처 원칙]
+    - 이 클래스는 '스캔 후 파일 저장'만 담당합니다. (스케줄러가 호출)
+    - 텔레그램 조회는 저장된 파일을 읽는 방식으로 완전히 분리되어 있습니다.
+    - 캐싱/Lock 로직 없음. 단순하고 예측 가능한 동작이 목표입니다.
     """
-    # 전역(클래스 단위) 캐시 메모리 탑재 -> 여러 스레드나 클래스가 각자 생성되더라도 단일 캐시를 공유합니다.
-    _cached_results = None
-    _last_scan_date = None
-    _scan_lock = threading.Lock()
-    
     def __init__(self):
         pass
         
@@ -63,6 +61,10 @@ class Screener:
         
     def is_minervini_trend(self, df: pd.DataFrame) -> bool:
         """[마크 미너비니 트렌드 템플릿 검사 (주도주 8원칙 적용)]"""
+        # 데이터 정제: 인덱스 중복 제거 및 종가(Close) 기준 결측치 제거 (미국장 등에서 가끔 발생)
+        df = df[~df.index.duplicated(keep='last')]
+        df = df.dropna(subset=['Close'])
+        
         # 1.5년(약 300영업일) 데이터가 없는 신규 상장주 등은 안전을 위해 제외
         if len(df) < 260:
             return False
@@ -104,30 +106,23 @@ class Screener:
             cond7 = c >= (high_52w * 0.75)
             
             return cond1 and cond2 and cond3 and cond4 and cond5 and cond6 and cond7
-        except Exception:
+        except Exception as e:
+            logging.debug(f"[Screener] 트렌드 필터 계산 중 오류 (종목 제외): {e}")
             return False
             
+    def get_watchlist_path(self) -> str:
+        """오늘 날짜 기반 워치리스트 파일 경로를 반환합니다."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        prefix = "us" if "US" in self.__class__.__name__ else "kr"
+        return f"watchlists/watchlist_{prefix}_{today}.csv"
+
     def run_daily_scan(self, top_n: int = 10) -> list:
         """
-        오늘 날짜(투데이) 확인 후 글로벌 클래스(Cache)에 결과물이 있다면 1초 내로 반환합니다.
-        스레드 락(Lock)을 활용한 '이중 검증 패턴(Double-Checked Locking)'으로 병목 스레드를 안전하게 우회합니다.
+        [스케줄러 전용] 전 종목을 스캔하고 결과를 watchlists/ 폴더에 저장합니다.
+        - 결과가 있으면: Symbol, Name, RS_Rating 컬럼을 포함한 CSV 저장
+        - 결과가 0개면: 헤더만 있는 빈 CSV 저장 (스캔 완료 마커 역할)
+        - 텔레그램 조회 시에는 이 함수를 호출하지 않습니다.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        # 1. 락 체결 없이 1초 컷으로 패스 (대부분 여기 통과)
-        if self.__class__._last_scan_date == today and self.__class__._cached_results is not None:
-            logging.info("[Screener] 오늘 이미 발굴 스캔이 스케줄러로 완료되었습니다. 캐시를 확보해 즉시 반환합니다.")
-            return self.__class__._cached_results
-            
-        # 2. 캐시가 비어있다면 락 체결! (누가 무거운 데이터 수집 문을 열고 들어감)
-        self.__class__._scan_lock.acquire()
-        
-        # 3. 문을 따고 들어간 직후 다시 확인 (내가 대기열에 선 동안 나보다 앞에 섰던 애가 캐시를 채워넣었을 수 있음)
-        if self.__class__._last_scan_date == today and self.__class__._cached_results is not None:
-            logging.info("[Screener] 대기열 통과 직후 캐시 확인! 연산을 건너뜁니다.")
-            self.__class__._scan_lock.release()
-            return self.__class__._cached_results
-            
         tickers_df = self.get_market_tickers()
         
         passed_stocks = []
@@ -136,13 +131,12 @@ class Screener:
         
         start_date = (datetime.now() - timedelta(days=600)).strftime("%Y-%m-%d")
         
-        logging.info("[Screener] 종목별 딥 스캔 시작 (이 작업은 보통 심야에 5~10분 소요됩니다)")
+        logging.info("[Screener] 종목별 딥 스캔 시작 (이 작업은 보통 5~10분 소요됩니다)")
         
         for idx, row in tickers_df.iterrows():
             symbol = row['Code']
             name = row['Name']
             try:
-                # KIS API 일봉은 개수 제한(100)이 있어 대량 백테스트는 fdr이 압도적으로 유리합니다.
                 df = fdr.DataReader(symbol, start=start_date)
                 
                 if df.empty or len(df) < 260:
@@ -155,51 +149,44 @@ class Screener:
                     rs_scores.append(rs)
                     
             except Exception as e:
-                pass
-                
-        # 판다스 데이터프레임으로 만들어 RS 랭킹화
+                logging.debug(f"[Screener] 종목 {symbol} 스캔 중 건너뜀: {e}")
+        
+        # RS 점수 정규화 및 정렬
         res_df = pd.DataFrame({
-            'Symbol': passed_stocks, 
+            'Symbol': passed_stocks,
             'Name': stock_names,
             'RS_Raw': rs_scores
         })
         
+        path = self.get_watchlist_path()
+        os.makedirs("watchlists", exist_ok=True)
+        
         if res_df.empty:
             logging.info("[Screener] 오늘 미너비니 주도주 필터를 통과한 대장주가 0개입니다 (하락장)")
-            self.__class__._scan_lock.release()
+            # 헤더만 있는 빈 파일 저장: "오늘 스캔 완료했지만 결과 없음" 마커
+            pd.DataFrame(columns=['Symbol', 'Name', 'RS_Rating']).to_csv(
+                path, index=False, encoding='utf-8-sig'
+            )
+            logging.info(f"[Screener] 스캔 완료 마커 파일 저장: '{path}'")
             return []
-            
-        # RS 점수를 1~99로 백분위(Percentile) 정규화
+        
         res_df['RS_Rating'] = res_df['RS_Raw'].rank(pct=True) * 99
         res_df = res_df.sort_values(by='RS_Rating', ascending=False)
-        
-        # 상위 N개의 종목코드, 종목명, RS점수 사전(Dict) 리스트 배출
         top_targets_df = res_df.head(top_n)[['Symbol', 'Name', 'RS_Rating']]
         
-        logging.info(f"[Screener] ✨오늘의 TOP {len(top_targets_df)} 주도주 발굴 완료 및 전역 메모리 캐싱 완료!")
-        
-        final_list = top_targets_df.to_dict('records')
-        self.__class__._cached_results = final_list
-        self.__class__._last_scan_date = today
-        
-        # 파일로 물리적 저장 (기록 아카이빙용)
         try:
-            os.makedirs("watchlists", exist_ok=True)
-            prefix = "us" if "US" in self.__class__.__name__ else "kr"
-            path = f"watchlists/watchlist_{prefix}_{today}.csv"
             save_df = top_targets_df.copy()
             save_df['RS_Rating'] = save_df['RS_Rating'].round(2)
             save_df.to_csv(path, index=False, encoding='utf-8-sig')
-            logging.info(f"[Screener] 스캔 결과가 '{path}' 에 체계적으로 보관되었습니다.")
+            logging.info(f"[Screener] ✨TOP {len(top_targets_df)} 주도주 발굴 완료. '{path}' 에 저장되었습니다.")
         except Exception as e:
             logging.error(f"[Screener] 파일 저장 실패: {e}")
         
-        self.__class__._scan_lock.release()
-        return final_list
+        return top_targets_df.to_dict('records')
+
 
 if __name__ == "__main__":
-    # 스캐너 단독 실행 테스트
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
     screener = Screener()
-    # 테스트를 위해 300종목 중 최상위 5개를 빠르게 색출해봅니다.
-    top_5_picks = screener.run_daily_scan(top_n=5)
+    screener.run_daily_scan(top_n=5)
+
