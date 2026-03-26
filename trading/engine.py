@@ -92,39 +92,46 @@ class BotEngine:
             logging.error(f"[BotEngine] 미국장 사전 스캔 중 오류: {e}")
 
     def run_morning_scan(self):
-        """
-        매일 아침 08:00에 동작하여 국내 상장 전 종목을 사전(Pre) 스캔하고 캐싱 및 이벤트 버스로 전송합니다.
-        (CSV 저장 및 캐싱은 Screener 내부 로직에서 자체적으로 파일 분리 체계에 맞추어 수행합니다.)
-        """
-        logging.info("========== [주간 작업] 아침 08시 주도주 발굴 스캐너 가동 ==========")
+        """매일 아침 08:00에 동작하여 국내 상장 듀얼 트랙(대형주/성장주)을 사전 스캔합니다."""
+        logging.info("========== [주간 작업] 아침 08시 듀얼 트랙 스캐너 가동 ==========")
         try:
-            # 10개 종목을 필터링해옵니다. (시간 소요됨)
-            targets_info = self.screener.run_daily_scan(top_n=10)
+            # 1. 대형 주도주 스캔 (Top 200)
+            large_targets = self.screener.run_daily_scan(top_n=10, mode="LARGE")
             
-            if not targets_info:
-                logging.info("-> 오늘 미너비니 7대 원칙을 뚫고 올라온 대장주가 없습니다. (관망 유지)")
+            # 2. 중소형 성장주 스캔 (시총 1조 이하 + 거래대금 상위)
+            growth_targets = self.screener.run_daily_scan(top_n=10, mode="GROWTH")
             
-            # 발굴 정보(결과물 유무에 상관없이)를 이벤트 버스에 던짐
-            self.event_bus.publish("SCAN_COMPLETED", {"targets": targets_info})
+            # 통합 결과 (이벤트 전송용)
+            combined_targets = large_targets + growth_targets
+            self.event_bus.publish("SCAN_COMPLETED", {"targets": combined_targets})
                 
         except Exception as e:
+            logging.error(f"[BotEngine] 국내장 듀얼 스캔 중 오류: {e}")
+
             logging.error(f"[BotEngine] 아침 스캔 중 오류 발생: {e}")
             self.event_bus.publish("SCAN_ERROR", {"error": str(e)})
 
     def load_watchlist(self) -> list:
-        """오늘 날짜로 저장된 watchlists/watchlist_kr_YYYY-MM-DD.csv 타겟 배열을 읽어옵니다."""
+        """오늘 날짜의 모든 워치리스트(large/growth)를 통합하여 리스트를 반환합니다."""
         today = datetime.datetime.now().strftime("%Y-%m-%d")
-        path = f"watchlists/watchlist_kr_{today}.csv"
+        modes = ["large", "growth"]
+        combined_symbols = []
         
-        if not os.path.exists(path):
-            return []
-        try:
-            df = pd.read_csv(path, encoding='utf-8-sig')
-            # 종목번호가 숫자로 변환되며 앞의 0이 잘려버릴 수 있으므로 6자리 문자열로 원상복구합니다 (예: 5930 -> 005930)
-            return df['Symbol'].astype(str).str.zfill(6).tolist()
-        except Exception as e:
-            logging.error(f"[BotEngine] 워치리스트 파일을 읽을 수 없습니다 ({path}): {e}")
-            return []
+        for mode in modes:
+            path = f"watchlists/watchlist_kr_{mode}_{today}.csv"
+            if not os.path.exists(path):
+                continue
+            try:
+                # KRX 종목번호 6자리 유지를 위해 zfill 처리
+                df = pd.read_csv(path, encoding='utf-8-sig')
+                symbols = df['Symbol'].astype(str).str.zfill(6).tolist()
+                combined_symbols.extend(symbols)
+            except Exception as e:
+                logging.error(f"[BotEngine] 워치리스트 로드 실패 ({path}): {e}")
+        
+        # 중복 제거 (대형주이면서 성장주 조건에 걸릴 가능성 대비)
+        return list(set(combined_symbols))
+
 
     def is_market_open(self) -> bool:
         """한국 주식 시장 평일 09:00 ~ 15:20 필터링"""
@@ -142,11 +149,12 @@ class BotEngine:
             logging.info("[대기] 텔레그램 원격 제어를 통해 엔진이 멈춰있습니다. 매매 루프를 건너뜁니다.")
             return
             
-        if not self.is_market_open():
-            logging.info("[대기] 현재는 주식 시장 개장 시간이 아닙니다.")
+        if not self.api.access_token:
+            logging.info("[대기] API 인증 토큰이 없습니다. 스캐닝 점검은 계속되나 자동매매는 비활성화됩니다.")
             return
 
         balance_info = self.api.get_account_balance()
+
         if not balance_info: return
             
         holdings = balance_info['holdings']
@@ -240,8 +248,13 @@ class BotEngine:
         symbol = data.get("symbol")
         if not symbol: return
         
+        if not self.api.access_token:
+            self.event_bus.publish("MANUAL_BUY_RESULT", {"success": False, "symbol": symbol, "reason": "API 인증 키가 설정되지 않았습니다. .env 파일을 확인해 주세요."})
+            return
+            
         try:
             balance = self.api.get_account_balance()
+
             if not balance:
                 self.event_bus.publish("MANUAL_BUY_RESULT", {"success": False, "symbol": symbol, "reason": "API 잔고 조회 불가"})
                 return

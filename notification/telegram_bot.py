@@ -141,32 +141,34 @@ class TelegramBotManager:
         msg = "✅ *[봇 생존 신고]*\n현재 관제탑과 알림 봇이 퍼블릭 모드로 정상 가동 중입니다."
         send_telegram_msg(msg, chat_id=chat_id)
 
-    def _read_watchlist(self, market: str) -> list:
+    def _read_watchlist(self, market: str, mode: str = None) -> list:
         """
         [공통 파일 조회 헬퍼]
-        오늘 날짜의 워치리스트 CSV 파일을 읽어서 dict 리스트로 반환합니다.
-        반환값:
-          - list(dict): 주도주 리스트 (정상)
-          - None: 파일이 없음 (아직 스캔 전)
-          - []: 파일 있지만 데이터 0개 (하락장 확인)
+        오늘 날짜의 워치리스트 CSV 파일을 읽습니다.
+        mode가 있으면 (ex: large, growth) 파일명에 포함하여 조회합니다.
         """
         today = datetime.now().strftime("%Y-%m-%d")
-        path = f"watchlists/watchlist_{market}_{today}.csv"
+        if mode:
+            path = f"watchlists/watchlist_{market}_{mode.lower()}_{today}.csv"
+        else:
+            path = f"watchlists/watchlist_{market}_{today}.csv"
         
         if not os.path.exists(path):
-            return None  # 파일 없음 = 아직 스캔 전
+            return None
         
         try:
             df = pd.read_csv(path, encoding='utf-8-sig')
-            return df.to_dict('records')  # 0행이어도 [] 반환 (하락장 마커)
+            return df.to_dict('records')
         except Exception as e:
             logging.error(f"[TelegramBot] 워치리스트 파일 읽기 실패 ({path}): {e}")
-            return None  # 파일 파싱 실패도 None으로 안내
+            return None
+
 
     def _reply_scan_kr(self, chat_id):
-        results = self._read_watchlist("kr")
+        large_results = self._read_watchlist("kr", mode="large")
+        growth_results = self._read_watchlist("kr", mode="growth")
         
-        if results is None:
+        if large_results is None and growth_results is None:
             send_telegram_msg(
                 "🇰🇷 *[국내장 주도주 조회]*\n"
                 "아직 오늘 스캔 데이터가 준비되지 않았습니다.\n"
@@ -175,18 +177,25 @@ class TelegramBotManager:
             )
             return
         
-        if not results:
-            send_telegram_msg(
-                "🐯 [국내장 스캔 결과]\n"
-                "오늘 미너비니 7대 원칙을 통과한 대장주가 *0개*입니다. (하락장, 관망 권장)",
-                chat_id=chat_id
-            )
-            return
+        msg = "🇰🇷 *[국내장 주도주 요약]*\n미너비니 콤보 스캔 결과!\n\n"
         
-        msg = f"🐯 [국내장 주도주 TOP {len(results)}]\n한국 증시 중 미너비니 요건을 통과한 대장주!\n\n"
-        for rank, stock in enumerate(results, 1):
-            msg += f"{rank}위: {stock['Name']} ({stock['Symbol']}) - RS {float(stock['RS_Rating']):.1f}점\n"
+        # 1. 대형 주도주 섹션
+        msg += "🐯 *[대형 주도주 TOP 5 (시총 200위)]*\n"
+        if large_results:
+            for rank, stock in enumerate(large_results[:5], 1):
+                msg += f"{rank}위: {stock['Name']} - RS {float(stock['RS_Rating']):.1f}점\n"
+        else:
+            msg += "작격 조건에 부합하는 종목이 없습니다.\n"
+            
+        msg += "\n🚀 *[중소형 성장주 TOP 5 (거래량 폭발)]*\n"
+        if growth_results:
+            for rank, stock in enumerate(growth_results[:5], 1):
+                msg += f"{rank}위: {stock['Name']} - RS {float(stock['RS_Rating']):.1f}점\n"
+        else:
+            msg += "작격 조건에 부합하는 종목이 없습니다.\n"
+            
         send_telegram_msg(msg, chat_id=chat_id)
+
 
     def _reply_scan_us(self, chat_id):
         results = self._read_watchlist("us")

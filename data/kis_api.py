@@ -19,30 +19,35 @@ class KoreaInvestmentAPI:
     def _issue_token(self):
         """
         [OAuth 인증 토큰 발급]
-        사용자의 App Key와 App Secret을 이용해 API 사용을 위한 임시 토큰(일반적으로 1일 유지)을 발급받습니다.
+        인증 실패 시 시스템을 중단하지 않고 None을 반환하여, 
+        트레이딩 기능만 선택적으로 비활성화되도록 합니다.
         """
         path = "oauth2/tokenP"
         url = f"{self.url_base}/{path}"
         
-        # 헤더 설정
+        # 필수 키가 기본값이거나 비어있으면 시도조차 하지 않음
+        if not self.app_key or "발급받은" in self.app_key:
+            logging.warning("[System] KIS_APP_KEY가 설정되지 않았습니다. 트레이딩 기능이 제한됩니다.")
+            return None
+
         headers = {"content-type": "application/json"}
-        
-        # 요청 바디 (Data)
         data = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
             "appsecret": self.app_secret
         }
         
-        # POST 요청으로 토큰 발급 시도
-        res = requests.post(url, headers=headers, data=json.dumps(data))
-        res.raise_for_status() # HTTP 200 정상 응답이 아닐 경우 예외 발생
-        
-        result = res.json()
-        token = result.get("access_token")
-        
-        print("[System] API 인증 토큰 발급 성공!")
-        return f"Bearer {token}"
+        try:
+            res = requests.post(url, headers=headers, data=json.dumps(data), timeout=5)
+            res.raise_for_status()
+            result = res.json()
+            token = result.get("access_token")
+            logging.info("[System] KIS API 인증 성공!")
+            return f"Bearer {token}"
+        except Exception as e:
+            logging.warning(f"[System] KIS API 인증 실패 (트레이딩 기능 비활성화): {e}")
+            return None
+
         
     def get_account_balance(self):
         """
