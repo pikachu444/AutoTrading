@@ -179,22 +179,23 @@ class TelegramBotManager:
         
         msg = "🇰🇷 *[국내장 주도주 요약]*\n미너비니 콤보 스캔 결과!\n\n"
         
-        # 1. 대형 주도주 섹션
-        msg += "🐯 *[대형 주도주 TOP 5 (시총 200위)]*\n"
+        # 1. 대형 주도주 섹션 (TOP 10)
+        msg += "🐯 *[대형 주도주 TOP 10 (시총 200위)]*\n"
         if large_results:
-            for rank, stock in enumerate(large_results[:5], 1):
+            for rank, stock in enumerate(large_results[:10], 1):
                 msg += f"{rank}위: {stock['Name']} - RS {float(stock['RS_Rating']):.1f}점\n"
         else:
-            msg += "작격 조건에 부합하는 종목이 없습니다.\n"
+            msg += "자격 조건에 부합하는 종목이 없습니다.\n"
             
-        msg += "\n🚀 *[중소형 성장주 TOP 5 (거래량 폭발)]*\n"
+        msg += "\n🚀 *[중소형 성장주 TOP 10 (거래량/변동성)]*\n"
         if growth_results:
-            for rank, stock in enumerate(growth_results[:5], 1):
+            for rank, stock in enumerate(growth_results[:10], 1):
                 msg += f"{rank}위: {stock['Name']} - RS {float(stock['RS_Rating']):.1f}점\n"
         else:
-            msg += "작격 조건에 부합하는 종목이 없습니다.\n"
+            msg += "자격 조건에 부합하는 종목이 없습니다.\n"
             
         send_telegram_msg(msg, chat_id=chat_id)
+
 
 
     def _reply_scan_us(self, chat_id):

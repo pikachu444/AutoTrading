@@ -1,5 +1,6 @@
 import requests
 import json
+import logging
 from core.config import APP_KEY, APP_SECRET, URL_BASE, CANO, PRDT_CD
 
 class KoreaInvestmentAPI:
